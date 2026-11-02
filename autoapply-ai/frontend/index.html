@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoApply AI</title>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+    rel="stylesheet"
+  />
+
+  <!-- Main stylesheet -->
+  <link rel="stylesheet" href="src/styles/main.css" />
+
+  <!-- Favicon placeholder -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>" />
+</head>
+<body>
+
+  <!-- =====================================================================
+       App Shell
+  ====================================================================== -->
+  <div id="app">
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="sidebar">
+      <!-- Logo -->
+      <div class="sidebar-logo">
+        <span class="logo-icon">🚀</span>
+        <span class="logo-text">AutoApply <strong>AI</strong></span>
+      </div>
+
+      <!-- Navigation -->
+      <nav class="sidebar-nav" id="sidebar-nav">
+        <a href="#/dashboard" class="nav-link" data-route="/dashboard">
+          <span class="nav-icon">📊</span>
+          <span class="nav-label">Dashboard</span>
+        </a>
+        <a href="#/apply" class="nav-link" data-route="/apply">
+          <span class="nav-icon">➕</span>
+          <span class="nav-label">Apply</span>
+        </a>
+        <a href="#/profile" class="nav-link" data-route="/profile">
+          <span class="nav-icon">👤</span>
+          <span class="nav-label">Profile</span>
+        </a>
+        <a href="#/settings" class="nav-link" data-route="/settings">
+          <span class="nav-icon">⚙️</span>
+          <span class="nav-label">Settings</span>
+        </a>
+      </nav>
+
+      <!-- Sidebar footer -->
+      <div class="sidebar-footer">
+        <button id="logout-btn" class="btn btn-ghost btn-sm">
+          <span>🚪</span> Logout
+        </button>
+      </div>
+    </aside>
+
+    <!-- Mobile overlay -->
+    <div id="sidebar-overlay" class="sidebar-overlay" onclick="closeSidebar()"></div>
+
+    <!-- Main wrapper -->
+    <div class="main-wrapper" id="main-wrapper">
+
+      <!-- Top bar (mobile) -->
+      <header class="topbar" id="topbar">
+        <button class="hamburger" id="hamburger-btn" onclick="openSidebar()">
+          <span></span><span></span><span></span>
+        </button>
+        <span class="topbar-title" id="topbar-title">AutoApply AI</span>
+        <div class="topbar-spacer"></div>
+      </header>
+
+      <!-- Page content -->
+      <main id="main-content" class="main-content">
+        <!-- Pages are injected here by the router -->
+        <div class="page-loading">
+          <div class="spinner"></div>
+          <p>Loading…</p>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- =====================================================================
+       Toast Container
+  ====================================================================== -->
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <!-- =====================================================================
+       Global Modal (shared)
+  ====================================================================== -->
+  <div id="global-modal" class="modal-overlay" style="display:none;" onclick="closeGlobalModal(event)">
+    <div class="modal-box" id="global-modal-box">
+      <button class="modal-close-btn" onclick="closeGlobalModal()">×</button>
+      <div id="global-modal-content"></div>
+    </div>
+  </div>
+
+  <!-- =====================================================================
+       Scripts (order matters)
+  ====================================================================== -->
+  <script src="src/components/api.js"></script>
+  <script src="src/components/toast.js"></script>
+  <script src="src/components/chatbot.js"></script>
+  <script src="src/pages/auth.js"></script>
+  <script src="src/pages/dashboard.js"></script>
+  <script src="src/pages/apply.js"></script>
+  <script src="src/pages/profile.js"></script>
+  <script src="src/pages/settings.js"></script>
+  <!-- Router must be loaded last so all page modules are defined -->
+  <script src="src/components/router.js"></script>
+
+  <script>
+    // ---------------------------------------------------------------------------
+    // Sidebar helpers (used by HTML onclick attributes)
+    // ---------------------------------------------------------------------------
+    function openSidebar() {
+      document.getElementById('sidebar').classList.add('open');
+      document.getElementById('sidebar-overlay').classList.add('active');
+    }
+    function closeSidebar() {
+      document.getElementById('sidebar').classList.remove('open');
+      document.getElementById('sidebar-overlay').classList.remove('active');
+    }
+
+    // ---------------------------------------------------------------------------
+    // Global Modal helpers
+    // ---------------------------------------------------------------------------
+    function openGlobalModal(htmlContent) {
+      document.getElementById('global-modal-content').innerHTML = htmlContent;
+      document.getElementById('global-modal').style.display = 'flex';
+    }
+    function closeGlobalModal(event) {
+      if (!event || event.target === document.getElementById('global-modal')) {
+        document.getElementById('global-modal').style.display = 'none';
+        document.getElementById('global-modal-content').innerHTML = '';
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Logout
+    // ---------------------------------------------------------------------------
+    document.getElementById('logout-btn').addEventListener('click', () => {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      window.location.hash = '#/login';
+    });
+  </script>
+</body>
+</html>
