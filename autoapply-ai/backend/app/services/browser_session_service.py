@@ -168,6 +168,7 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300) -> di
         "session_id": session_id,
         "status": "launching",
         "started_at": datetime.now(timezone.utc).isoformat(),
+        "start_ts": time.time(),
         "message": "Opening browser window for LinkedIn login...",
     }
 
@@ -211,36 +212,52 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300) -> di
             while time.time() - start_time < timeout_seconds:
                 try:
                     # Check if page context was closed by user
-                    if not context.pages:
+                    if not context.pages or page.is_closed():
                         break
 
                     current_url = page.url.lower()
 
-                    # 1. URL signal: redirected to feed or user profile
-                    if "linkedin.com/feed" in current_url or "linkedin.com/in/" in current_url:
+                    # 1. URL signal: redirected to feed, user profile, jobs, or mynetwork
+                    auth_url_tokens = ["linkedin.com/feed", "linkedin.com/in/", "linkedin.com/mynetwork", "linkedin.com/jobs"]
+                    if any(tok in current_url for tok in auth_url_tokens):
                         logged_in = True
                         break
 
                     # 2. Check for li_at cookie
-                    cookies = context.cookies(["https://www.linkedin.com"])
-                    for c in cookies:
-                        if c.get("name") == "li_at":
-                            logged_in = True
-                            break
+                    try:
+                        cookies = context.cookies(["https://www.linkedin.com"])
+                        for c in cookies:
+                            if c.get("name") == "li_at" and c.get("value"):
+                                logged_in = True
+                                break
+                    except Exception:
+                        pass
 
                     if logged_in:
                         break
 
                     # 3. Check for in-page feed nav element
-                    if page.query_selector("nav.global-nav, .feed-identity-module, [data-view-name*='profile']"):
-                        logged_in = True
-                        break
+                    try:
+                        if page.query_selector("nav.global-nav, .feed-identity-module, [data-view-name*='profile']"):
+                            logged_in = True
+                            break
+                    except Exception:
+                        pass
+
+                    # 4. Status hints for checkpoints / 2FA
+                    if "checkpoint" in current_url or "challenge" in current_url:
+                        _active_interactive_sessions[user_id]["message"] = "Security verification or 2FA detected. Please complete the verification in the opened browser window."
 
                     time.sleep(1.5)
                 except Exception as loop_e:
-                    # Target closed or interrupted
-                    logger.info(f"Interactive browser loop ended: {loop_e}")
-                    break
+                    err_str = str(loop_e).lower()
+                    if not context.pages or page.is_closed() or "target closed" in err_str or "browser has been closed" in err_str:
+                        logger.info(f"Interactive browser loop closed: {loop_e}")
+                        break
+                    # Transient error like context destroyed during page navigation
+                    logger.debug(f"Transient interactive loop error (navigation in progress): {loop_e}")
+                    time.sleep(1.5)
+                    continue
 
             if logged_in:
                 # Wait briefly to let session cookies settle

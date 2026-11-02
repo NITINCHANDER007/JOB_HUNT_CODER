@@ -647,7 +647,9 @@ class BaseAdapter:
         """
         import time
         from app.adapters.exceptions import ResumeUploadError
+        from app.utils.validators import resolve_resume_path
 
+        resume_path = resolve_resume_path(resume_path)
         if not resume_path or not os.path.isfile(resume_path):
             raise ResumeUploadError(f"Resume file not found at path: {resume_path}")
 

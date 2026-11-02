@@ -43,15 +43,18 @@ def session_connect(current_user):
     Runs asynchronously in a background thread so the user can interact freely.
     """
     user_id = str(current_user.id)
+    force = request.args.get("force") == "true" or (request.is_json and bool(request.json and request.json.get("force")))
 
     # Check if a login session is already running
     active = _active_interactive_sessions.get(user_id)
-    if active and active.get("status") in ["launching", "waiting_for_user"]:
-        return jsonify({
-            "message": "Interactive browser window is already open. Please complete your login.",
-            "status": active.get("status"),
-            "session": active,
-        })
+    if not force and active and active.get("status") in ["launching", "waiting_for_user"]:
+        import time
+        if time.time() - active.get("start_ts", 0) < 300:
+            return jsonify({
+                "message": "Interactive browser window is already open. Please complete your login.",
+                "status": active.get("status"),
+                "session": active,
+            })
 
     def _run_login():
         launch_manual_linkedin_login(user_id=user_id, timeout_seconds=300)

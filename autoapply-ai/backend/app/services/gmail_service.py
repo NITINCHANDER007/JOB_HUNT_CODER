@@ -22,24 +22,22 @@ from app import db
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_REDIRECT_URI = os.environ.get(
-    "GOOGLE_REDIRECT_URI", "http://localhost:5000/api/gmail/callback"
-)
 FERNET_KEY = os.environ.get("FERNET_KEY", Fernet.generate_key().decode())
-
 _fernet = Fernet(FERNET_KEY.encode() if isinstance(FERNET_KEY, str) else FERNET_KEY)
 
-_CLIENT_CONFIG = {
-    "web": {
-        "client_id": GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
-        "redirect_uris": [GOOGLE_REDIRECT_URI],
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-    }
-}
+
+def is_gmail_configured() -> bool:
+    """Return True if Google OAuth client ID and secret are present in environment."""
+    cid = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+    csec = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+    return bool(cid and csec)
+
+
+def get_google_redirect_uri() -> str:
+    """Return the configured OAuth redirect URI (defaulting to current backend port 5050)."""
+    return os.environ.get(
+        "GOOGLE_REDIRECT_URI", "http://localhost:5050/api/gmail/callback"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -47,10 +45,28 @@ _CLIENT_CONFIG = {
 # ---------------------------------------------------------------------------
 
 def _build_flow() -> Flow:
+    if not is_gmail_configured():
+        raise ValueError(
+            "Google OAuth credentials are not configured. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env."
+        )
+
+    client_id = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+    redirect_uri = get_google_redirect_uri()
+
+    client_config = {
+        "web": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uris": [redirect_uri],
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    }
     return Flow.from_client_config(
-        _CLIENT_CONFIG,
+        client_config,
         scopes=GMAIL_SCOPES,
-        redirect_uri=GOOGLE_REDIRECT_URI,
+        redirect_uri=redirect_uri,
     )
 
 
@@ -69,8 +85,8 @@ def _creds_from_token_dict(token_dict: dict) -> Credentials:
         token=token_dict.get("token"),
         refresh_token=token_dict.get("refresh_token"),
         token_uri=token_dict.get("token_uri", "https://oauth2.googleapis.com/token"),
-        client_id=GOOGLE_CLIENT_ID,
-        client_secret=GOOGLE_CLIENT_SECRET,
+        client_id=os.environ.get("GOOGLE_CLIENT_ID", ""),
+        client_secret=os.environ.get("GOOGLE_CLIENT_SECRET", ""),
         scopes=GMAIL_SCOPES,
     )
 

@@ -81,3 +81,45 @@ def normalize_job_url(url: str) -> str:
         return normalized
     except Exception:
         return sanitized.rstrip("/")
+
+
+def resolve_resume_path(resume_path: str) -> str:
+    """
+    Resolve a resume file path across project and upload directories to an absolute path that exists.
+    Returns the absolute path if found, or the original path.
+    """
+    import os
+
+    if not resume_path:
+        return ""
+    if os.path.isabs(resume_path) and os.path.isfile(resume_path):
+        return os.path.abspath(resume_path)
+
+    basename = os.path.basename(resume_path)
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    root_dir = os.path.dirname(backend_dir)
+
+    candidates = [
+        resume_path,
+        os.path.abspath(resume_path),
+        os.path.join(os.getcwd(), resume_path),
+        os.path.join(backend_dir, "uploads", "resumes", basename),
+        os.path.join(root_dir, "uploads", "resumes", basename),
+        os.path.join(os.getcwd(), "autoapply-ai", "backend", "uploads", "resumes", basename),
+        os.path.join(os.getcwd(), "autoapply-ai", "uploads", "resumes", basename),
+        os.path.join(os.getcwd(), "uploads", "resumes", basename),
+    ]
+
+    try:
+        from flask import current_app, has_app_context
+        if has_app_context() and "RESUME_FOLDER" in current_app.config:
+            candidates.insert(0, os.path.join(current_app.config["RESUME_FOLDER"], basename))
+    except Exception:
+        pass
+
+    for cand in candidates:
+        if cand and os.path.isfile(cand):
+            return os.path.abspath(cand)
+
+    return os.path.abspath(resume_path) if os.path.isabs(resume_path) else resume_path
+

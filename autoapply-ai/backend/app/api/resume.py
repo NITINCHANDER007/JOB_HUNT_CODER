@@ -69,7 +69,7 @@ def upload_resume(current_user):
     os.makedirs(resume_folder, exist_ok=True)
 
     stored_filename = f"{uuid.uuid4().hex}{ext}"
-    file_path = os.path.join(resume_folder, stored_filename)
+    file_path = os.path.abspath(os.path.join(resume_folder, stored_filename))
 
     try:
         file.save(file_path)

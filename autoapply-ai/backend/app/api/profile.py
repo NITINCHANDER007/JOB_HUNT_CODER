@@ -302,7 +302,7 @@ def upload_resume(current_user):
 
     original_filename = secure_filename(file.filename) or "resume.pdf"
     stored_filename = f"{uuid.uuid4().hex}.pdf"
-    file_path = os.path.join(resume_folder, stored_filename)
+    file_path = os.path.abspath(os.path.join(resume_folder, stored_filename))
 
     try:
         file.save(file_path)

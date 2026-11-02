@@ -78,27 +78,14 @@ def run_application_pipeline(application_id: str) -> dict:
     if not primary_resume:
         raise ValueError("User has no resume uploaded")
 
-    resume_path = primary_resume.file_path
-    if not os.path.exists(resume_path):
-        # Fallback candidate locations across cwd and backend uploads
-        basename = os.path.basename(resume_path)
-        configured_resume_folder = current_app.config.get("RESUME_FOLDER", "uploads/resumes") if has_app_context() else os.getenv("RESUME_FOLDER", "uploads/resumes")
-        candidates = [
-            os.path.join(configured_resume_folder, basename),
-            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "uploads", "resumes", basename),
-            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "uploads", "resumes", basename),
-            os.path.join(os.getcwd(), resume_path),
-            os.path.join(os.getcwd(), "uploads", "resumes", basename),
-        ]
-        found = None
-        for cand in candidates:
-            if os.path.exists(cand):
-                found = cand
-                break
-        if found:
-            resume_path = found
-        else:
-            raise ValueError(f"Resume file not found at {resume_path}")
+    from app.utils.validators import resolve_resume_path
+    resume_path = resolve_resume_path(primary_resume.file_path)
+    if not resume_path or not os.path.isfile(resume_path):
+        raise ValueError(f"Resume file not found at {primary_resume.file_path or 'unspecified location'}")
+
+    if primary_resume.file_path != resume_path:
+        primary_resume.file_path = resume_path
+        db.session.commit()
 
     profile_dict = profile.to_dict()
     profile_dict["full_name"] = user.full_name

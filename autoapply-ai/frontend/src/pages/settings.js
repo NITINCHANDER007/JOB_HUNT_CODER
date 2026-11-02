@@ -288,6 +288,9 @@ const SettingsPage = (() => {
           <div style="color: var(--text-secondary);">
             Please log into your LinkedIn account in the window (and complete any 2FA/CAPTCHA). We'll automatically detect when you're logged in.
           </div>
+          <div id="li-status-detail" style="font-weight: 500; color: #38bdf8; margin-top: 6px; font-size: 0.8rem;">
+            Waiting for your login in the browser window...
+          </div>
         </div>
       `;
     }
@@ -302,6 +305,11 @@ const SettingsPage = (() => {
           const res = await linkedinAPI.connectStatus();
           const interactive = res.interactive || {};
           const session = res.session || {};
+
+          if (interactive.message && progress) {
+            const detail = progress.querySelector('#li-status-detail');
+            if (detail) detail.textContent = interactive.message;
+          }
 
           if (session.connected || interactive.status === 'success') {
             clearInterval(_linkedinPollTimer);
@@ -335,13 +343,16 @@ const SettingsPage = (() => {
 
   function checkGmailCallback() {
     const hash = window.location.hash;
-    if (hash.includes('gmail_connected=true')) {
+    if (hash.includes('gmail_connected=true') || hash.includes('gmail=success')) {
       showToast('Gmail connected successfully!', 'success');
       window.location.hash = '#/settings';
-    } else if (hash.includes('gmail_error=')) {
-      const error = hash.match(/gmail_error=([^&]*)/);
-      showToast('Gmail connection failed: ' + (error ? error[1] : 'unknown'), 'error');
+      loadGmailStatus();
+    } else if (hash.includes('gmail_error=') || hash.includes('gmail=error')) {
+      const match = hash.match(/gmail_error=([^&]*)/) || hash.match(/reason=([^&]*)/);
+      const errMsg = match ? decodeURIComponent(match[1]) : 'unknown error';
+      showToast('Gmail connection failed: ' + errMsg, 'error');
       window.location.hash = '#/settings';
+      loadGmailStatus();
     }
   }
 
@@ -383,6 +394,32 @@ const SettingsPage = (() => {
             showToast(err.message, 'error');
           }
         });
+      } else if (status.configured === false) {
+        container.innerHTML = `
+          <div class="gmail-disconnected">
+            <span class="status-dot status-dot-gray"></span>
+            <span>Not Connected &bull; <strong style="color: #f59e0b;">OAuth Not Configured</strong></span>
+          </div>
+          <p class="text-xs text-muted" style="margin-top: 8px; line-height: 1.4;">
+            To connect Gmail, configure <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> in your <code>.env</code> file with redirect URI <code>${escapeHtml(status.redirect_uri || 'http://localhost:5050/api/gmail/callback')}</code>.
+          </p>
+          <button class="btn btn-primary btn-sm" id="gmail-connect-btn" style="margin-top: 10px;">
+            Connect Gmail
+          </button>
+        `;
+
+        document.getElementById('gmail-connect-btn').addEventListener('click', async () => {
+          try {
+            const data = await gmailAPI.authUrl();
+            if (data.auth_url) {
+              window.open(data.auth_url, '_blank', 'width=600,height=700');
+            } else {
+              showToast(data.error || 'Google OAuth is not configured in .env', 'error');
+            }
+          } catch (err) {
+            showToast(err.message || 'Google OAuth is not configured in .env', 'error');
+          }
+        });
       } else {
         container.innerHTML = `
           <div class="gmail-disconnected">
@@ -397,14 +434,18 @@ const SettingsPage = (() => {
         document.getElementById('gmail-connect-btn').addEventListener('click', async () => {
           try {
             const data = await gmailAPI.authUrl();
-            window.open(data.auth_url, '_blank', 'width=600,height=700');
+            if (data.auth_url) {
+              window.open(data.auth_url, '_blank', 'width=600,height=700');
+            } else {
+              showToast(data.error || 'Failed to start Gmail auth', 'error');
+            }
           } catch (err) {
             showToast('Failed to start Gmail auth: ' + err.message, 'error');
           }
         });
       }
     } catch (err) {
-      container.innerHTML = `<p class="text-error">Failed to load Gmail status</p>`;
+      container.innerHTML = `<p class="text-error">Failed to load Gmail status: ${escapeHtml(err.message || '')}</p>`;
     }
   }
 

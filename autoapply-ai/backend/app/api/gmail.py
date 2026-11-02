@@ -29,12 +29,17 @@ FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 @token_required
 def gmail_auth(current_user):
     """Return the Google OAuth2 URL that the frontend should redirect the user to."""
+    from app.services.gmail_service import is_gmail_configured
+    if not is_gmail_configured():
+        return jsonify({
+            "error": "Google OAuth is not configured. Please add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to autoapply-ai/.env"
+        }), 400
     try:
         auth_url = get_gmail_auth_url(str(current_user.id))
         return jsonify({"auth_url": auth_url})
     except Exception as exc:  # noqa: BLE001
         current_app.logger.error("Gmail auth URL error: %s", exc)
-        return jsonify({"error": "Failed to generate Gmail auth URL"}), 500
+        return jsonify({"error": "Failed to generate Gmail auth URL", "detail": str(exc)}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -54,19 +59,19 @@ def gmail_callback():
 
     if error:
         current_app.logger.warning("Gmail OAuth error: %s", error)
-        return redirect(f"{FRONTEND_URL}/#/settings?gmail=error&reason={error}")
+        return redirect(f"{FRONTEND_URL}/#/settings?gmail=error&gmail_error={error}&reason={error}")
 
     if not code or not state:
-        return redirect(f"{FRONTEND_URL}/#/settings?gmail=error&reason=missing_params")
+        return redirect(f"{FRONTEND_URL}/#/settings?gmail=error&gmail_error=missing_params&reason=missing_params")
 
     try:
         result = handle_gmail_callback(code, state)
         email = result.get("email", "")
-        return redirect(f"{FRONTEND_URL}/#/settings?gmail=success&email={email}")
+        return redirect(f"{FRONTEND_URL}/#/settings?gmail=success&gmail_connected=true&email={email}")
     except Exception as exc:  # noqa: BLE001
         current_app.logger.error("Gmail callback error: %s", exc)
         return redirect(
-            f"{FRONTEND_URL}/#/settings?gmail=error&reason=token_exchange_failed"
+            f"{FRONTEND_URL}/#/settings?gmail=error&gmail_error=token_exchange_failed&reason=token_exchange_failed"
         )
 
 
@@ -91,11 +96,19 @@ def gmail_disconnect(current_user):
 @gmail_bp.route("/status", methods=["GET"])
 @token_required
 def gmail_status(current_user):
+    from app.services.gmail_service import is_gmail_configured, get_google_redirect_uri
+    configured = is_gmail_configured()
     connected = bool(
         getattr(current_user, "gmail_token_encrypted", None)
     )
     email = getattr(current_user, "gmail_email", None) if connected else None
-    return jsonify({"connected": connected, "email": email})
+    return jsonify({
+        "connected": connected,
+        "email": email,
+        "configured": configured,
+        "redirect_uri": get_google_redirect_uri(),
+        "error": None if configured else "Google OAuth credentials (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET) missing in .env",
+    })
 
 
 # ---------------------------------------------------------------------------
