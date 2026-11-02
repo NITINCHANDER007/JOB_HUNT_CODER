@@ -30,31 +30,31 @@ const ApplyPage = (() => {
   async function render(container) {
     stopPolling();
     container.innerHTML = `
-      <div class="page-header">
-        <h1>Apply to a Job</h1>
-        <p class="text-muted">Paste a job application link and we'll handle the rest</p>
+      <div class="page-header" style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px; margin-bottom: 20px;">
+        <div>
+          <h1>Apply to a Job</h1>
+          <p class="text-muted">Paste a job application link and AutoApply AI handles the rest</p>
+        </div>
+        <div id="rate-limit-badge" class="badge badge-info" style="font-size: 0.8rem; padding: 6px 12px; font-weight: 500;">
+          <span class="spinner-sm"></span> Loading usage…
+        </div>
       </div>
 
-      <!-- Completeness Gate Banner -->
+      <!-- Completeness Gate Banner (Only shown if profile is incomplete) -->
       <div id="profile-gate-banner"></div>
 
       <!-- LinkedIn Session Status Pill -->
       <div id="linkedin-status-pill" style="margin-bottom: 16px;"></div>
 
-      <!-- Rate limit info -->
-      <div class="rate-limit-bar" id="rate-limit-bar">
-        <span class="spinner-sm"></span> Loading usage…
-      </div>
-
       <!-- Apply Form -->
-      <div class="card apply-card">
+      <div class="card apply-card" style="padding: 24px;">
         <form id="apply-form">
           <div class="apply-input-group">
             <input
               type="url"
               id="job-url-input"
               class="apply-input"
-              placeholder="https://www.linkedin.com/jobs/view/12345 or https://boards.greenhouse.io/..."
+              placeholder="https://www.linkedin.com/jobs/view/... or Greenhouse, Lever, Ashby, ByteDance link"
               required
               autocomplete="url"
             />
@@ -62,15 +62,25 @@ const ApplyPage = (() => {
               🚀 Apply
             </button>
           </div>
-          <p class="apply-hint text-muted">
-            Supports: LinkedIn Easy Apply (with your saved browser session), Greenhouse, Lever, Ashby, Workday, SmartRecruiters, ByteDance, and company career pages
-          </p>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; align-items: center;">
+            <span class="text-muted" style="font-size: 0.78rem;">Supported:</span>
+            <span class="badge" style="background: rgba(255,255,255,0.06); font-size: 0.75rem;">LinkedIn Easy Apply</span>
+            <span class="badge" style="background: rgba(255,255,255,0.06); font-size: 0.75rem;">Greenhouse</span>
+            <span class="badge" style="background: rgba(255,255,255,0.06); font-size: 0.75rem;">Lever</span>
+            <span class="badge" style="background: rgba(255,255,255,0.06); font-size: 0.75rem;">Ashby</span>
+            <span class="badge" style="background: rgba(255,255,255,0.06); font-size: 0.75rem;">Workday</span>
+            <span class="badge" style="background: rgba(255,255,255,0.06); font-size: 0.75rem;">ByteDance</span>
+            <span class="badge" style="background: rgba(255,255,255,0.06); font-size: 0.75rem;">Company Career Pages</span>
+          </div>
         </form>
       </div>
 
       <!-- Recent Applications -->
       <div class="card" style="margin-top: 24px;">
-        <h3 class="card-title">Recent Applications</h3>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+          <h3 class="card-title" style="margin: 0;">Recent Submissions</h3>
+          <a href="#/dashboard" class="text-muted text-xs" style="text-decoration: underline;">View All on Dashboard →</a>
+        </div>
         <div id="recent-apps">
           <div class="page-loading"><div class="spinner-sm"></div></div>
         </div>
@@ -217,11 +227,7 @@ const ApplyPage = (() => {
       } else {
         if (input) input.disabled = false;
         if (btn) btn.disabled = false;
-        banner.innerHTML = `
-          <div style="display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--success); margin-bottom: 16px; padding: 8px 12px; background: rgba(34, 197, 94, 0.08); border-radius: var(--radius-sm); border: 1px solid rgba(34, 197, 94, 0.2);">
-            <span>✓</span> Profile is 100% complete. Automated 1-click apply is active!
-          </div>
-        `;
+        banner.innerHTML = '';
       }
     } catch (err) {
       console.warn("Could not check completeness:", err);
@@ -229,26 +235,16 @@ const ApplyPage = (() => {
   }
 
   async function loadRateLimit() {
-    const bar = document.getElementById('rate-limit-bar');
-    if (!bar) return;
+    const badge = document.getElementById('rate-limit-badge');
+    if (!badge) return;
     try {
       const data = await applicationsAPI.list({ per_page: 1 });
       const used = data.count_today || 0;
       const limit = data.limit || 50;
-      const pct = Math.round((used / limit) * 100);
-      const color = pct > 80 ? 'var(--error)' : pct > 50 ? 'var(--warning)' : 'var(--accent)';
-
-      bar.innerHTML = `
-        <div class="rate-limit-info">
-          <span>${used} of ${limit} applications used today</span>
-          <span class="text-muted">${limit - used} remaining</span>
-        </div>
-        <div class="progress-bar-track">
-          <div class="progress-bar-fill" style="width: ${pct}%; background: ${color};"></div>
-        </div>
-      `;
+      const remaining = Math.max(0, limit - used);
+      badge.innerHTML = `⚡ <strong>${remaining}</strong> of ${limit} applies left today`;
     } catch (err) {
-      bar.innerHTML = '<span class="text-muted">Could not load usage info</span>';
+      badge.textContent = '50 applies / day';
     }
   }
 
@@ -259,7 +255,7 @@ const ApplyPage = (() => {
       return;
     }
     try {
-      const data = await applicationsAPI.list({ per_page: 6 });
+      const data = await applicationsAPI.list({ per_page: 4 });
       const apps = data.applications || [];
 
       // Auto-poll if any app is QUEUED or APPLYING
@@ -271,11 +267,11 @@ const ApplyPage = (() => {
       }
 
       if (apps.length === 0) {
-        container.innerHTML = '<p class="text-muted">No applications yet. Paste a URL above to get started!</p>';
+        container.innerHTML = '<p class="text-muted text-sm" style="margin: 4px 0;">No applications submitted yet. Paste a URL above to start.</p>';
         return;
       }
 
-      let html = '<div class="recent-apps-list" style="display: flex; flex-direction: column; gap: 12px;">';
+      let html = '<div class="recent-apps-list" style="display: flex; flex-direction: column; gap: 8px;">';
       for (const app of apps) {
         const statusClass = {
           QUEUED: 'badge-info',
@@ -292,7 +288,7 @@ const ApplyPage = (() => {
           SUBMITTED: 'Submitted – Unverified',
           APPLIED: 'Applied – Verified',
           FAILED: 'Failed',
-          NEEDS_ACTION: 'Manual Intervention Required',
+          NEEDS_ACTION: 'Action Required',
         }[app.status] || app.status;
 
         const date = new Date(app.created_at).toLocaleDateString('en-US', {
@@ -303,42 +299,28 @@ const ApplyPage = (() => {
           ? `<button class="btn btn-xs btn-warning retry-btn" data-id="${app.id}" style="padding: 2px 8px; font-size: 0.75rem;">Retry</button>`
           : '';
 
-        // Check if awaiting review approval
         let approveBtn = '';
         if (app.status === 'NEEDS_ACTION' && app.action_details && app.action_details.type === 'review_approval') {
-          approveBtn = `<button class="btn btn-xs btn-primary approve-btn" data-id="${app.id}" style="padding: 2px 10px; font-size: 0.75rem; background: var(--success); border-color: var(--success);">✓ Approve & Submit</button>`;
+          approveBtn = `<button class="btn btn-xs btn-primary approve-btn" data-id="${app.id}" style="padding: 2px 10px; font-size: 0.75rem; background: var(--success); border-color: var(--success);">✓ Approve</button>`;
         }
 
-        let alertBox = '';
-        if (app.error_message) {
-          const isAction = app.status === 'NEEDS_ACTION';
-          const bg = isAction ? 'rgba(245, 158, 11, 0.08)' : 'rgba(239, 68, 68, 0.08)';
-          const border = isAction ? 'var(--warning, #f59e0b)' : 'var(--error, #ef4444)';
-          const icon = isAction ? '⚠️' : '❌';
-          alertBox = `
-            <div style="margin-top: 8px; padding: 8px 12px; background: ${bg}; border-left: 3px solid ${border}; border-radius: 4px; font-size: 0.82rem; line-height: 1.4;">
-              <span style="font-weight: 600;">${icon} ${isAction ? 'Action Required' : 'Notice'}:</span> ${escapeHtml(app.error_message)}
-            </div>
-          `;
-        }
-
-        const resumeNote = app.resume_used ? `<span class="text-muted" style="font-size: 0.75rem;">• Resume: ${escapeHtml(app.resume_used)}</span>` : '';
+        const errorTooltip = app.error_message
+          ? `<span class="text-muted" style="cursor: help; font-size: 0.78rem;" title="${escapeAttr(app.error_message)}">ⓘ Info</span>`
+          : '';
 
         html += `
-          <div class="recent-app-item" style="padding: 12px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm);">
-            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
-              <div class="recent-app-info" style="display: flex; flex-direction: column; gap: 2px;">
-                <span class="company" style="font-weight: 600; font-size: 0.95rem;">${escapeHtml(app.company || 'Job Application')}</span>
-                <span class="role text-muted" style="font-size: 0.82rem;">${escapeHtml(app.role || app.url)} ${resumeNote}</span>
-              </div>
-              <div style="display: flex; align-items: center; gap: 8px;">
-                <span class="status-badge ${statusClass}">${statusLabel}</span>
-                ${approveBtn}
-                ${retryBtn}
-                <span class="text-muted recent-app-date" style="font-size: 0.78rem;">${date}</span>
-              </div>
+          <div class="recent-app-item" style="padding: 10px 14px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+            <div class="recent-app-info" style="display: flex; flex-direction: column; gap: 2px; min-width: 200px;">
+              <span class="company" style="font-weight: 600; font-size: 0.9rem;">${escapeHtml(app.company || 'Job Application')}</span>
+              <span class="role text-muted" style="font-size: 0.78rem;">${escapeHtml(app.role || app.url)}</span>
             </div>
-            ${alertBox}
+            <div style="display: flex; align-items: center; gap: 8px;">
+              ${errorTooltip}
+              <span class="status-badge ${statusClass}">${statusLabel}</span>
+              ${approveBtn}
+              ${retryBtn}
+              <span class="text-muted recent-app-date" style="font-size: 0.75rem;">${date}</span>
+            </div>
           </div>
         `;
       }
