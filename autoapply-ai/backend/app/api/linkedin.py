@@ -66,13 +66,15 @@ def session_connect(current_user):
     thread = threading.Thread(target=_run_login, daemon=True)
     thread.start()
 
-    # Wait up to 5 seconds for launch verification
-    ready_event.wait(timeout=5.0)
+    # Wait up to 8 seconds for launch verification
+    ready_event.wait(timeout=8.0)
 
     active_now = _active_interactive_sessions.get(user_id, {})
     if active_now.get("status") == "error":
+        err_msg = active_now.get("error") or active_now.get("message") or "Failed to launch Chrome on desktop."
         return jsonify({
-            "error": active_now.get("error") or active_now.get("message"),
+            "error": err_msg,
+            "message": err_msg,
             "status": "error",
             "browser_verified": False,
         }), 500

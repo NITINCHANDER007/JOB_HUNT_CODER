@@ -567,5 +567,14 @@ const ApplyPage = (() => {
     return d.innerHTML;
   }
 
+  function escapeAttr(str) {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
   return { render };
 })();

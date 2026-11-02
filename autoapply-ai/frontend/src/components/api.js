@@ -7,6 +7,22 @@ const BASE_URL = (window.location.origin && window.location.origin.startsWith('h
   ? window.location.origin
   : 'http://localhost:5050';
 
+// Global sanitization helpers
+window.escapeHtml = window.escapeHtml || function(str) {
+  const d = document.createElement('div');
+  d.textContent = str || '';
+  return d.innerHTML;
+};
+
+window.escapeAttr = window.escapeAttr || function(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+};
+
 // ---------------------------------------------------------------------------
 // Core fetch wrapper
 // ---------------------------------------------------------------------------

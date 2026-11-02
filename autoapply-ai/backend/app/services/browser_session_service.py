@@ -58,20 +58,46 @@ def get_storage_state_path(user_id: Optional[str]) -> str:
     return os.path.join(profile_dir, "storage_state.json")
 
 
-def _get_chrome_launch_kwargs() -> dict:
-    """
-    Detect whether Google Chrome is installed on the host system to launch real Chrome,
-    otherwise fallback to Playwright's bundled Chromium.
-    """
+def find_chrome_executable() -> Optional[str]:
+    """Find installed Google Chrome binary on host."""
     chrome_paths = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
         os.path.expandvars(r"%PROGRAMFILES%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%PROGRAMFILES(X86)%\Google\Chrome\Application\chrome.exe"),
+        shutil.which("chrome"),
+        shutil.which("google-chrome"),
+        shutil.which("google-chrome-stable"),
     ]
     for p in chrome_paths:
-        if os.path.isfile(p):
-            return {"channel": "chrome"}
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+
+def is_running_in_docker() -> bool:
+    """Detect whether backend is executing inside a Docker container."""
+    return os.path.exists("/.dockerenv") or os.getenv("DOCKER_CONTAINER") == "true"
+
+
+def find_free_port(start_port: int = 9222) -> int:
+    """Find an available TCP port for Chrome remote debugging."""
+    import socket
+    for port in range(start_port, start_port + 50):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    return start_port
+
+
+def _get_chrome_launch_kwargs() -> dict:
+    """
+    Detect whether Google Chrome is installed on the host system to launch real Chrome,
+    otherwise fallback to Playwright's bundled Chromium.
+    """
+    if find_chrome_executable():
+        return {"channel": "chrome"}
     return {}
 
 
@@ -207,10 +233,17 @@ def get_linkedin_session_status(user_id: Optional[str]) -> dict:
 
 def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300, ready_event=None) -> dict:
     """
-    Launch a visible (headed) Chrome browser session using the user's persistent profile.
-    Navigates to https://www.linkedin.com/login and waits for the user to manually log in,
-    complete 2FA/OTP/CAPTCHA. Once logged in, exports storage_state.json and saves session.
+    Launch a visible Google Chrome browser window on the user's desktop using
+    their persistent Chrome profile directory.
+    - If running on Windows directly: launches native Chrome via subprocess with CDP remote debugging,
+      verifies actual process running and CDP responsiveness, then attaches Playwright.
+    - If running inside Docker: calls the local Windows browser bridge on host.docker.internal,
+      or returns clear actionable instructions.
+    - Waits for manual LinkedIn login (2FA/OTP/CAPTCHA supported).
+    - Detects login via li_at cookie and URL changes, saves storage_state.json and metadata.
     """
+    import subprocess
+    import urllib.request
     from playwright.sync_api import sync_playwright
 
     profile_dir = get_user_profile_dir(user_id)
@@ -232,63 +265,168 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300, ready
     except Exception as lock_err:
         logger.warning("Note during profile lock cleanup: %s", lock_err)
 
+    proc = None
+    cdp_port = 9222
+    cdp_url = None
+
     try:
+        # Check if inside Docker
+        if is_running_in_docker():
+            logger.info("Backend detected running inside Docker container")
+            bridge_hosts = ["host.docker.internal", "172.17.0.1", "localhost"]
+            bridge_working = False
+            for bh in bridge_hosts:
+                try:
+                    with urllib.request.urlopen(f"http://{bh}:9225/status", timeout=1.5) as resp:
+                        if resp.status == 200:
+                            bridge_working = True
+                            # Launch through bridge
+                            launch_req = urllib.request.Request(
+                                f"http://{bh}:9225/launch",
+                                data=json.dumps({"profile_dir": profile_dir, "url": "https://www.linkedin.com/login"}).encode("utf-8"),
+                                headers={"Content-Type": "application/json"}
+                            )
+                            with urllib.request.urlopen(launch_req, timeout=10) as lresp:
+                                ldata = json.loads(lresp.read().decode("utf-8"))
+                                cdp_port = ldata.get("cdp_port", 9222)
+                                cdp_url = f"http://{bh}:{cdp_port}"
+                                break
+                except Exception:
+                    continue
+
+            if not bridge_working or not cdp_url:
+                err_msg = (
+                    "Backend is running inside a Docker container without desktop display access. "
+                    "To launch visible Chrome on your desktop, run 'start_windows_browser_bridge.bat' "
+                    "on your Windows host, or run the backend natively using 'python autoapply-ai\\backend\\run.py'."
+                )
+                _active_interactive_sessions[user_id] = {
+                    "session_id": session_id,
+                    "status": "error",
+                    "browser_verified": False,
+                    "error": err_msg,
+                    "message": err_msg,
+                }
+                if ready_event:
+                    ready_event.set()
+                return {"success": False, "connected": False, "error": err_msg, "message": err_msg}
+
+        else:
+            # Running natively on Windows
+            chrome_exe = find_chrome_executable()
+            if not chrome_exe:
+                err_msg = (
+                    "Google Chrome executable not found on Windows at standard installation locations. "
+                    "Please install Google Chrome (https://www.google.com/chrome) to enable interactive Easy Apply."
+                )
+                _active_interactive_sessions[user_id] = {
+                    "session_id": session_id,
+                    "status": "error",
+                    "browser_verified": False,
+                    "error": err_msg,
+                    "message": err_msg,
+                }
+                if ready_event:
+                    ready_event.set()
+                return {"success": False, "connected": False, "error": err_msg, "message": err_msg}
+
+            cdp_port = find_free_port(9222)
+            cdp_url = f"http://127.0.0.1:{cdp_port}"
+
+            cmd = [
+                chrome_exe,
+                f"--user-data-dir={profile_dir}",
+                f"--remote-debugging-port={cdp_port}",
+                "--new-window",
+                "--start-maximized",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-blink-features=AutomationControlled",
+                "https://www.linkedin.com/login"
+            ]
+
+            logger.info("Launching native Chrome on desktop: %s", " ".join(cmd))
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+
+            # Verify that process started and CDP endpoint responds
+            verified = False
+            for _ in range(16):
+                time.sleep(0.5)
+                if proc.poll() is not None:
+                    _, err_text = proc.communicate()
+                    err_msg = f"Chrome process exited immediately (code {proc.returncode}): {err_text or 'Profile locked or incompatible flags'}"
+                    _active_interactive_sessions[user_id] = {
+                        "session_id": session_id,
+                        "status": "error",
+                        "browser_verified": False,
+                        "error": err_msg,
+                        "message": err_msg,
+                    }
+                    if ready_event:
+                        ready_event.set()
+                    return {"success": False, "connected": False, "error": err_msg, "message": err_msg}
+
+                try:
+                    with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=1) as resp:
+                        if resp.status == 200:
+                            verified = True
+                            break
+                except Exception:
+                    pass
+
+            if not verified:
+                err_msg = f"Chrome launched (PID {proc.pid}) but debugging port {cdp_port} did not respond within timeout."
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                _active_interactive_sessions[user_id] = {
+                    "session_id": session_id,
+                    "status": "error",
+                    "browser_verified": False,
+                    "error": err_msg,
+                    "message": err_msg,
+                }
+                if ready_event:
+                    ready_event.set()
+                return {"success": False, "connected": False, "error": err_msg, "message": err_msg}
+
+        # BROWSER IS GENUINELY VERIFIED OPEN ON DESKTOP
+        logger.info("Chrome desktop window verified open at CDP %s", cdp_url)
+        _active_interactive_sessions[user_id]["status"] = "waiting_for_user"
+        _active_interactive_sessions[user_id]["browser_verified"] = True
+        pid_info = f" (PID {proc.pid})" if proc else ""
+        _active_interactive_sessions[user_id]["message"] = f"Chrome browser window is open on your desktop{pid_info}! Please log into your LinkedIn account."
+        if ready_event:
+            ready_event.set()
+
+        # Connect Playwright to the live Chrome session over CDP
         with sync_playwright() as pw:
-            launch_kwargs = _get_chrome_launch_kwargs()
-            logger.info("Launching Chrome with launch_kwargs: %s", launch_kwargs)
-
-            # Launch persistent context headed and maximized so user can interact directly
-            context = pw.chromium.launch_persistent_context(
-                user_data_dir=profile_dir,
-                headless=False,
-                no_viewport=True,
-                user_agent=_DEFAULT_USER_AGENT,
-                locale="en-US",
-                timezone_id="America/New_York",
-                args=[
-                    "--start-maximized",
-                    "--new-window",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
-                ],
-                **launch_kwargs
-            )
-
-            # Mask automation flags
-            context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
-
+            browser = pw.chromium.connect_over_cdp(cdp_url)
+            context = browser.contexts[0] if browser.contexts else browser.new_context()
             page = context.pages[0] if context.pages else context.new_page()
+
             try:
                 page.bring_to_front()
             except Exception:
                 pass
 
-            logger.info(f"Navigating to LinkedIn login in headed browser for user {user_id}")
-            try:
-                page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=45000)
-            except Exception as nav_e:
-                logger.warning(f"Initial navigation note: {nav_e}")
-
-            # Window is verified open on the user desktop
-            _active_interactive_sessions[user_id]["status"] = "waiting_for_user"
-            _active_interactive_sessions[user_id]["browser_verified"] = True
-            _active_interactive_sessions[user_id]["message"] = "Chrome window is open on your desktop! Please log into your LinkedIn account."
-            if ready_event:
-                ready_event.set()
-
-            # Polling loop: wait for user to sign in
             start_time = time.time()
             logged_in = False
             user_name_found = None
 
             while time.time() - start_time < timeout_seconds:
                 try:
-                    # Check if page context was closed by user
-                    if not context.pages or page.is_closed():
-                        logger.info("Chrome window closed by user.")
+                    if proc and proc.poll() is not None:
+                        logger.info("Chrome process terminated by user.")
+                        break
+                    if not browser.is_connected() or not context.pages or page.is_closed():
+                        logger.info("Browser window or tab closed by user.")
                         break
 
                     current_url = page.url.lower()
@@ -320,31 +458,35 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300, ready
                     except Exception:
                         pass
 
-                    # 4. Status hints for checkpoints / 2FA
+                    # Status hints for checkpoints / 2FA
                     if "checkpoint" in current_url or "challenge" in current_url:
                         _active_interactive_sessions[user_id]["message"] = "Security verification or 2FA detected. Please complete the verification in the opened Chrome window."
                     elif "checkpoint/lg/login-submit" in current_url:
                         _active_interactive_sessions[user_id]["message"] = "Submitting credentials... Please complete any 2FA challenge if prompted."
 
                     time.sleep(1.5)
+
                 except Exception as loop_e:
                     err_str = str(loop_e).lower()
-                    if not context.pages or page.is_closed() or "target closed" in err_str or "browser has been closed" in err_str:
-                        logger.info(f"Interactive browser loop closed: {loop_e}")
+                    if "closed" in err_str or "target closed" in err_str:
                         break
-                    # Transient error like context destroyed during page navigation
-                    logger.debug(f"Transient interactive loop error (navigation in progress): {loop_e}")
                     time.sleep(1.5)
-                    continue
+
+            # Check if login succeeded right before closing
+            if not logged_in:
+                try:
+                    cookies = context.cookies(["https://www.linkedin.com"])
+                    for c in cookies:
+                        if c.get("name") == "li_at" and c.get("value"):
+                            logged_in = True
+                            break
+                except Exception:
+                    pass
 
             if logged_in:
-                # Wait briefly to let session cookies settle
                 time.sleep(2.0)
                 try:
-                    # Attempt to extract user's profile name from header/avatar
-                    name_el = page.query_selector(
-                        ".global-nav__me-photo, .feed-identity-module__actor-meta, h1.text-heading-xlarge"
-                    )
+                    name_el = page.query_selector(".global-nav__me-photo, .feed-identity-module__actor-meta, h1.text-heading-xlarge")
                     if name_el:
                         user_name_found = name_el.get_attribute("alt") or name_el.inner_text().strip()
                 except Exception:
@@ -353,7 +495,7 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300, ready
                 # Save storage state snapshot
                 context.storage_state(path=state_file)
 
-                # Save session metadata
+                # Save metadata
                 meta_file = os.path.join(profile_dir, "session_meta.json")
                 try:
                     with open(meta_file, "w", encoding="utf-8") as mf:
@@ -367,29 +509,39 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300, ready
                 _active_interactive_sessions[user_id]["status"] = "success"
                 _active_interactive_sessions[user_id]["message"] = "LinkedIn login detected! Session is saved."
 
-                # Gracefully close
                 try:
-                    context.close()
+                    browser.close()
                 except Exception:
                     pass
+                if proc and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
 
                 return {
                     "success": True,
                     "connected": True,
                     "message": "LinkedIn logged in and persistent session saved successfully! You can now use Easy Apply.",
-                    "user_name": user_name_found or "LinkedIn User",
+                    "user_name": user_name_found or "LinkedIn Member",
                 }
             else:
                 try:
-                    context.close()
+                    browser.close()
                 except Exception:
                     pass
+                if proc and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+
                 _active_interactive_sessions[user_id]["status"] = "timed_out"
                 _active_interactive_sessions[user_id]["message"] = "Login timed out or window was closed before completing."
                 return {
                     "success": False,
                     "connected": False,
-                    "message": "LinkedIn login timed out or the browser was closed before completing authentication.",
+                    "message": "LinkedIn login timed out or browser window was closed before completing authentication.",
                 }
 
     except Exception as e:
@@ -401,14 +553,13 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300, ready
             "error": str(e),
             "message": f"Could not launch Chrome: {e}",
         }
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
         if ready_event:
             ready_event.set()
-        return {
-            "success": False,
-            "connected": False,
-            "error": str(e),
-            "message": f"Could not launch browser login: {e}",
-        }
         return {
             "success": False,
             "connected": False,
@@ -436,42 +587,25 @@ def verify_linkedin_session(user_id: str) -> dict:
 
     try:
         with sync_playwright() as pw:
-            context = pw.chromium.launch_persistent_context(
-                user_data_dir=profile_dir,
-                headless=True,
+            browser = pw.chromium.launch(headless=True)
+            context = browser.new_context(
+                storage_state=state_file,
                 viewport={"width": 1280, "height": 800},
                 user_agent=_DEFAULT_USER_AGENT,
                 locale="en-US",
                 timezone_id="America/New_York",
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
-                ],
             )
-            context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
-
-            page = context.new_page() if not context.pages else context.pages[0]
-            page.set_default_timeout(20000)
-
+            page = context.new_page()
             try:
-                page.goto("https://www.linkedin.com/feed", wait_until="domcontentloaded", timeout=20000)
-                time.sleep(2.0)
+                page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
             except Exception as nav_e:
-                context.close()
-                return {
-                    "valid": False,
-                    "connected": False,
-                    "message": f"Network error during verification: {nav_e}",
-                }
+                logger.warning("Navigation during verify: %s", nav_e)
 
             current_url = page.url.lower()
 
             # Check if redirected to login / authwall / checkpoint
             if any(p in current_url for p in ["/login", "/authwall", "/checkpoint", "/uas/login"]):
-                context.close()
+                browser.close()
                 return {
                     "valid": False,
                     "connected": False,
@@ -486,7 +620,7 @@ def verify_linkedin_session(user_id: str) -> dict:
             if is_valid:
                 context.storage_state(path=state_file)
 
-            context.close()
+            browser.close()
 
             return {
                 "valid": is_valid,
