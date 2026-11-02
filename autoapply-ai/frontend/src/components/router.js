@@ -6,12 +6,10 @@
 const Router = (() => {
   // Route registry: hash path -> { render, requiresAuth, title }
   const routes = {
-    '/login':     { render: AuthPage.renderLogin,    requiresAuth: false, title: 'Login' },
-    '/register':  { render: AuthPage.renderRegister, requiresAuth: false, title: 'Register' },
-    '/dashboard': { render: DashboardPage.render,    requiresAuth: true,  title: 'Dashboard' },
-    '/apply':     { render: ApplyPage.render,        requiresAuth: true,  title: 'Apply' },
-    '/profile':   { render: ProfilePage.render,      requiresAuth: true,  title: 'Profile' },
-    '/settings':  { render: SettingsPage.render,     requiresAuth: true,  title: 'Settings' },
+    '/login':    { render: AuthPage.renderLogin,    requiresAuth: false, title: 'Login' },
+    '/register': { render: AuthPage.renderRegister, requiresAuth: false, title: 'Register' },
+    '/apply':    { render: ApplyPage.render,        requiresAuth: true,  title: 'Apply' },
+    '/profile':  { render: ProfilePage.render,      requiresAuth: true,  title: 'Profile' },
   };
 
   function isAuthenticated() {
@@ -23,7 +21,7 @@ const Router = (() => {
   }
 
   function getCurrentRoute() {
-    const hash = window.location.hash.replace('#', '') || '/dashboard';
+    const hash = window.location.hash.replace('#', '') || '/apply';
     return hash;
   }
 
@@ -59,7 +57,7 @@ const Router = (() => {
     if (!routeConfig) {
       // Default redirect
       if (isAuthenticated()) {
-        navigate('#/dashboard');
+        navigate('#/apply');
       } else {
         navigate('#/login');
       }
@@ -72,9 +70,9 @@ const Router = (() => {
       return;
     }
 
-    // If authenticated and trying to access login/register, redirect to dashboard
+    // If authenticated and trying to access login/register, redirect to apply
     if (!routeConfig.requiresAuth && isAuthenticated() && (route === '/login' || route === '/register')) {
-      navigate('#/dashboard');
+      navigate('#/apply');
       return;
     }
 
@@ -121,7 +119,7 @@ const Router = (() => {
     window.addEventListener('hashchange', handleRoute);
     // Initial route
     if (!window.location.hash) {
-      window.location.hash = isAuthenticated() ? '#/dashboard' : '#/login';
+      window.location.hash = isAuthenticated() ? '#/apply' : '#/login';
     } else {
       handleRoute();
     }

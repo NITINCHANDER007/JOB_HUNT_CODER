@@ -8,11 +8,16 @@ const ApplyPage = (() => {
   let _isProfileComplete = false;
   let _isLinkedInConnected = false;
   let _pollInterval = null;
+  let _linkedinPollTimer = null;
 
   function stopPolling() {
     if (_pollInterval) {
       clearInterval(_pollInterval);
       _pollInterval = null;
+    }
+    if (_linkedinPollTimer) {
+      clearInterval(_linkedinPollTimer);
+      _linkedinPollTimer = null;
     }
   }
 
@@ -79,7 +84,7 @@ const ApplyPage = (() => {
       <div class="card" style="margin-top: 24px;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
           <h3 class="card-title" style="margin: 0;">Recent Submissions</h3>
-          <a href="#/dashboard" class="text-muted text-xs" style="text-decoration: underline;">View All on Dashboard →</a>
+          <span class="text-muted text-xs">Live Status & Co-pilot Chatbot</span>
         </div>
         <div id="recent-apps">
           <div class="page-loading"><div class="spinner-sm"></div></div>
@@ -118,7 +123,7 @@ const ApplyPage = (() => {
 
       // LinkedIn check
       if (url.toLowerCase().includes('linkedin.com') && !_isLinkedInConnected) {
-        showToast('Notice: LinkedIn session is not connected. If this is an Easy Apply job, connect in Settings first.', 'warning');
+        showToast('Notice: LinkedIn session is not connected. Connect using the button above to enable Easy Apply.', 'warning');
       }
 
       btn.disabled = true;
@@ -149,28 +154,210 @@ const ApplyPage = (() => {
       _isLinkedInConnected = Boolean(data && data.connected);
 
       if (_isLinkedInConnected) {
+        const expiresText = (data.days_remaining !== null && data.days_remaining !== undefined)
+          ? `${data.days_remaining}d remaining`
+          : 'Active';
+
         pill.innerHTML = `
-          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.2); border-radius: var(--radius-sm); font-size: 0.85rem;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.2); border-radius: var(--radius-sm); font-size: 0.85rem; flex-wrap: wrap;">
             <div style="display: flex; align-items: center; gap: 8px;">
               <span class="status-dot status-dot-green"></span>
-              <span><strong>LinkedIn Session Active:</strong> Logged in as <em>${escapeHtml(data.user_name || 'Candidate')}</em></span>
+              <span><strong>LinkedIn Session Active:</strong> Logged in as <em>${escapeHtml(data.user_name || 'LinkedIn Member')}</em></span>
+              <span style="font-size: 0.8rem; color: var(--text-secondary);">(${escapeHtml(expiresText)})</span>
             </div>
-            <a href="#/settings" style="color: var(--accent); font-weight: 500; font-size: 0.82rem; text-decoration: none;">Manage Session →</a>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <button class="btn btn-xs btn-ghost" id="li-verify-btn" style="padding: 3px 8px; font-size: 0.78rem;">🔍 Verify</button>
+              <button class="btn btn-xs btn-error" id="li-disconnect-btn" style="padding: 3px 8px; font-size: 0.78rem;">Disconnect</button>
+            </div>
           </div>
         `;
+
+        document.getElementById('li-verify-btn')?.addEventListener('click', async () => {
+          const btn = document.getElementById('li-verify-btn');
+          btn.disabled = true;
+          btn.textContent = 'Verifying…';
+          try {
+            const res = await linkedinAPI.verify();
+            if (res.valid) {
+              showToast('LinkedIn session verified successfully! Ready for applications.', 'success');
+            } else {
+              showToast(`Session invalid: ${res.message}`, 'error');
+              await checkLinkedInSession();
+            }
+          } catch (err) {
+            showToast('Verification check error: ' + err.message, 'error');
+          } finally {
+            btn.disabled = false;
+            btn.textContent = '🔍 Verify';
+          }
+        });
+
+        document.getElementById('li-disconnect-btn')?.addEventListener('click', async () => {
+          if (!confirm('Disconnect your saved LinkedIn session? You will need to log in again to use Easy Apply.')) return;
+          try {
+            await linkedinAPI.disconnect();
+            showToast('LinkedIn session disconnected', 'info');
+            await checkLinkedInSession();
+          } catch (err) {
+            showToast(err.message, 'error');
+          }
+        });
+
       } else {
         pill.innerHTML = `
-          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: var(--radius-sm); font-size: 0.85rem;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: var(--radius-sm); font-size: 0.85rem; flex-wrap: wrap;">
             <div style="display: flex; align-items: center; gap: 8px;">
               <span class="status-dot status-dot-gray"></span>
-              <span><strong>LinkedIn Not Connected:</strong> Connect your session in Settings to enable 1-click Easy Apply.</span>
+              <span><strong>LinkedIn Not Connected:</strong> Connect your persistent browser session to enable 1-click Easy Apply.</span>
             </div>
-            <a href="#/settings" class="btn btn-xs btn-primary" style="padding: 3px 10px; font-size: 0.8rem;">Connect LinkedIn →</a>
+            <button class="btn btn-xs btn-primary" id="li-connect-btn" style="padding: 4px 12px; font-size: 0.8rem;">
+              🔗 Connect LinkedIn
+            </button>
           </div>
+          <div id="li-login-progress" style="margin-top: 10px; display: none;"></div>
         `;
+
+        document.getElementById('li-connect-btn')?.addEventListener('click', startInteractiveLinkedInLogin);
       }
     } catch (err) {
       console.warn("Could not check LinkedIn session:", err);
+    }
+  }
+
+  async function startInteractiveLinkedInLogin() {
+    const btn = document.getElementById('li-connect-btn');
+    const progress = document.getElementById('li-login-progress');
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-sm"></span> Launching Chrome…';
+    }
+    if (progress) {
+      progress.style.display = 'block';
+      progress.innerHTML = `
+        <div style="padding: 12px 16px; background: var(--bg-card); border: 1px solid var(--accent); border-radius: var(--radius-sm); font-size: 0.85rem;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="spinner-sm"></span>
+              <strong id="li-progress-title">Launching Chrome browser on your desktop…</strong>
+            </div>
+            <button class="btn btn-xs btn-ghost text-muted" id="li-cancel-btn" style="padding: 2px 8px; font-size: 0.75rem;">Cancel</button>
+          </div>
+          <div id="li-progress-msg" style="color: var(--text-secondary); line-height: 1.4;">
+            Preparing browser profile and launching Chrome window...
+          </div>
+          <div id="li-status-detail" style="font-weight: 500; color: #38bdf8; margin-top: 6px; font-size: 0.8rem;">
+            Connecting to browser process...
+          </div>
+        </div>
+      `;
+
+      const cancelBtn = progress.querySelector('#li-cancel-btn');
+      if (cancelBtn) {
+        cancelBtn.addEventListener('click', async () => {
+          if (_linkedinPollTimer) {
+            clearInterval(_linkedinPollTimer);
+            _linkedinPollTimer = null;
+          }
+          try {
+            await linkedinAPI.cancelLogin();
+          } catch (e) {
+            // ignore
+          }
+          showToast('LinkedIn login cancelled', 'info');
+          await checkLinkedInSession();
+        });
+      }
+    }
+
+    try {
+      const connectRes = await linkedinAPI.connect();
+
+      if (connectRes.status === 'error' || connectRes.error) {
+        throw new Error(connectRes.error || connectRes.message || 'Failed to launch Chrome');
+      }
+
+      const titleEl = progress ? progress.querySelector('#li-progress-title') : null;
+      const msgEl = progress ? progress.querySelector('#li-progress-msg') : null;
+      const detailEl = progress ? progress.querySelector('#li-status-detail') : null;
+
+      if (connectRes.browser_verified && titleEl) {
+        titleEl.textContent = 'Chrome browser window is open on your desktop!';
+        if (msgEl) msgEl.textContent = 'Please log into LinkedIn in the opened Chrome window. Automation will automatically detect your login.';
+      }
+      if (connectRes.message && detailEl) {
+        detailEl.textContent = connectRes.message;
+      }
+
+      if (_linkedinPollTimer) clearInterval(_linkedinPollTimer);
+      _linkedinPollTimer = setInterval(async () => {
+        try {
+          const res = await linkedinAPI.connectStatus();
+          const interactive = res.interactive || {};
+          const session = res.session || {};
+
+          if (progress) {
+            const detail = progress.querySelector('#li-status-detail');
+            const title = progress.querySelector('#li-progress-title');
+            const msg = progress.querySelector('#li-progress-msg');
+
+            if (interactive.message && detail) {
+              detail.textContent = interactive.message;
+            }
+
+            if (interactive.browser_verified && title && !title.textContent.includes('open')) {
+              title.textContent = 'Chrome browser window is open on your desktop!';
+              if (msg) msg.textContent = 'Please log into LinkedIn in the opened Chrome window. Automation will automatically detect your login.';
+            }
+          }
+
+          if (session.connected || interactive.status === 'success') {
+            clearInterval(_linkedinPollTimer);
+            _linkedinPollTimer = null;
+            showToast('LinkedIn login successful! Your persistent session is saved 🎉', 'success');
+            await checkLinkedInSession();
+          } else if (interactive.status === 'timed_out') {
+            clearInterval(_linkedinPollTimer);
+            _linkedinPollTimer = null;
+            showToast(interactive.message || 'Login timed out or window was closed', 'warning');
+            await checkLinkedInSession();
+          } else if (interactive.status === 'error') {
+            clearInterval(_linkedinPollTimer);
+            _linkedinPollTimer = null;
+            showToast('Chrome launch error: ' + (interactive.error || interactive.message), 'error');
+            if (progress) {
+              progress.innerHTML = `
+                <div style="padding: 10px 14px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: var(--radius-sm); font-size: 0.85rem; color: #ef4444;">
+                  <strong>Could not launch Chrome:</strong> ${escapeHtml(interactive.error || interactive.message)}
+                </div>
+              `;
+            }
+            if (btn) {
+              btn.disabled = false;
+              btn.textContent = '🔗 Connect LinkedIn';
+            }
+          }
+        } catch (e) {
+          // ignore transient poll error
+        }
+      }, 2000);
+
+    } catch (err) {
+      if (_linkedinPollTimer) {
+        clearInterval(_linkedinPollTimer);
+        _linkedinPollTimer = null;
+      }
+      showToast('Failed to start LinkedIn connection: ' + err.message, 'error');
+      if (progress) {
+        progress.innerHTML = `
+          <div style="padding: 10px 14px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: var(--radius-sm); font-size: 0.85rem; color: #ef4444;">
+            <strong>Launch Failed:</strong> ${escapeHtml(err.message)}
+          </div>
+        `;
+      }
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '🔗 Connect LinkedIn';
+      }
     }
   }
 

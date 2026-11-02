@@ -56,7 +56,7 @@ const AuthPage = (() => {
         localStorage.setItem('token', data.token);
         localStorage.setItem('user', JSON.stringify(data.user));
         showToast('Welcome back!', 'success');
-        window.location.hash = '#/dashboard';
+        window.location.hash = '#/apply';
       } catch (err) {
         showToast(err.message || 'Login failed', 'error');
       } finally {
