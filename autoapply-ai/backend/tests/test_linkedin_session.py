@@ -74,6 +74,59 @@ class TestLinkedInSessionService(unittest.TestCase):
         status_after = get_linkedin_session_status(uid)
         self.assertFalse(status_after["connected"])
 
+    def test_focus_and_cancel_interactive_browser(self):
+        """Test focus_interactive_browser and cancel_interactive_login behaviors."""
+        from app.services.browser_session_service import (
+            _active_interactive_sessions,
+            focus_interactive_browser,
+            cancel_interactive_login,
+            get_interactive_session_info,
+        )
+
+        uid = "test-focus-user-1"
+        # 1. When no active session exists
+        res = focus_interactive_browser(uid)
+        self.assertFalse(res["success"])
+        self.assertEqual(res["status"], "closed")
+
+        # 2. When active session exists and waiting for user
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 99999
+
+        _active_interactive_sessions[uid] = {
+            "session_id": "sess_1",
+            "status": "waiting_for_user",
+            "browser_verified": True,
+            "proc": mock_proc,
+            "pid": 99999,
+            "cdp_port": 9222,
+            "cdp_url": "http://127.0.0.1:9222",
+            "message": "Chrome browser window is open on your desktop!",
+        }
+
+        with patch("app.services.browser_session_service.bring_window_to_front", return_value=True):
+            with patch("urllib.request.urlopen") as mock_urlopen:
+                mock_resp = MagicMock()
+                mock_resp.read.return_value = json.dumps([{"id": "tab1"}]).encode()
+                mock_resp.__enter__.return_value = mock_resp
+                mock_urlopen.return_value = mock_resp
+
+                focus_res = focus_interactive_browser(uid)
+                self.assertTrue(focus_res["success"])
+                self.assertEqual(focus_res["status"], "waiting_for_user")
+
+        # 3. get_interactive_session_info should not include raw proc
+        info = get_interactive_session_info(uid)
+        self.assertNotIn("proc", info)
+        self.assertEqual(info["status"], "waiting_for_user")
+
+        # 4. cancel_interactive_login terminates process and cleans up
+        cancel_res = cancel_interactive_login(uid)
+        self.assertTrue(cancel_res["success"])
+        mock_proc.terminate.assert_called_once()
+        self.assertEqual(_active_interactive_sessions[uid]["status"], "cancelled")
+
     def test_strict_email_rule_enforcement(self):
         """Strict instruction: never use nitinchandra834@gmail.com, use codernitin55@gmail.com."""
         mock_page = MagicMock()

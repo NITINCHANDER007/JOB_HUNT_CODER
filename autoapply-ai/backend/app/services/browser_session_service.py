@@ -283,61 +283,36 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300, ready
                 ready_event.set()
             return {"success": False, "connected": False, "error": err_msg, "message": err_msg}
 
-            cdp_port = find_free_port(9222)
-            cdp_url = f"http://127.0.0.1:{cdp_port}"
+        cdp_port = find_free_port(9222)
+        cdp_url = f"http://127.0.0.1:{cdp_port}"
 
-            cmd = [
-                chrome_exe,
-                f"--user-data-dir={profile_dir}",
-                f"--remote-debugging-port={cdp_port}",
-                "--new-window",
-                "--start-maximized",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-blink-features=AutomationControlled",
-                "https://www.linkedin.com/login"
-            ]
+        cmd = [
+            chrome_exe,
+            f"--user-data-dir={profile_dir}",
+            f"--remote-debugging-port={cdp_port}",
+            "--new-window",
+            "--start-maximized",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-blink-features=AutomationControlled",
+            "https://www.linkedin.com/login"
+        ]
 
-            logger.info("Launching native Chrome on desktop: %s", " ".join(cmd))
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True
-            )
+        logger.info("Launching native Chrome on desktop: %s", " ".join(cmd))
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True
+        )
 
-            # Verify that process started and CDP endpoint responds
-            verified = False
-            for _ in range(16):
-                time.sleep(0.5)
-                if proc.poll() is not None:
-                    _, err_text = proc.communicate()
-                    err_msg = f"Chrome process exited immediately (code {proc.returncode}): {err_text or 'Profile locked or incompatible flags'}"
-                    _active_interactive_sessions[user_id] = {
-                        "session_id": session_id,
-                        "status": "error",
-                        "browser_verified": False,
-                        "error": err_msg,
-                        "message": err_msg,
-                    }
-                    if ready_event:
-                        ready_event.set()
-                    return {"success": False, "connected": False, "error": err_msg, "message": err_msg}
-
-                try:
-                    with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=1) as resp:
-                        if resp.status == 200:
-                            verified = True
-                            break
-                except Exception:
-                    pass
-
-            if not verified:
-                err_msg = f"Chrome launched (PID {proc.pid}) but debugging port {cdp_port} did not respond within timeout."
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+        # Verify that process started and CDP endpoint responds
+        verified = False
+        for _ in range(16):
+            time.sleep(0.5)
+            if proc.poll() is not None:
+                _, err_text = proc.communicate()
+                err_msg = f"Chrome process exited immediately (code {proc.returncode}): {err_text or 'Profile locked or incompatible flags'}"
                 _active_interactive_sessions[user_id] = {
                     "session_id": session_id,
                     "status": "error",
@@ -349,10 +324,39 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300, ready
                     ready_event.set()
                 return {"success": False, "connected": False, "error": err_msg, "message": err_msg}
 
+            try:
+                with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=1) as resp:
+                    if resp.status == 200:
+                        verified = True
+                        break
+            except Exception:
+                pass
+
+        if not verified:
+            err_msg = f"Chrome launched (PID {proc.pid}) but debugging port {cdp_port} did not respond within timeout."
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            _active_interactive_sessions[user_id] = {
+                "session_id": session_id,
+                "status": "error",
+                "browser_verified": False,
+                "error": err_msg,
+                "message": err_msg,
+            }
+            if ready_event:
+                ready_event.set()
+            return {"success": False, "connected": False, "error": err_msg, "message": err_msg}
+
         # BROWSER IS GENUINELY VERIFIED OPEN ON DESKTOP
         logger.info("Chrome desktop window verified open at CDP %s", cdp_url)
         _active_interactive_sessions[user_id]["status"] = "waiting_for_user"
         _active_interactive_sessions[user_id]["browser_verified"] = True
+        _active_interactive_sessions[user_id]["proc"] = proc
+        _active_interactive_sessions[user_id]["pid"] = proc.pid
+        _active_interactive_sessions[user_id]["cdp_port"] = cdp_port
+        _active_interactive_sessions[user_id]["cdp_url"] = cdp_url
         pid_info = f" (PID {proc.pid})" if proc else ""
         _active_interactive_sessions[user_id]["message"] = f"Chrome browser window is open on your desktop{pid_info}! Please log into your LinkedIn account."
         if ready_event:
@@ -620,6 +624,134 @@ def disconnect_linkedin_session(user_id: str) -> dict:
         "message": "LinkedIn session disconnected successfully.",
         "cleared_files": cleared,
     }
+
+
+def bring_window_to_front(pid: Optional[int] = None) -> bool:
+    """Bring the Chrome browser window with the given PID to the foreground on Windows."""
+    if not pid:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        SW_RESTORE = 9
+
+        found_hwnds = []
+
+        def enum_windows_callback(hwnd, _):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            proc_id = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(proc_id))
+            if proc_id.value == pid:
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length > 0:
+                    found_hwnds.append(hwnd)
+            return True
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        cb = WNDENUMPROC(enum_windows_callback)
+        user32.EnumWindows(cb, 0)
+
+        if found_hwnds:
+            target_hwnd = found_hwnds[0]
+            user32.ShowWindow(target_hwnd, SW_RESTORE)
+            user32.SetForegroundWindow(target_hwnd)
+            return True
+    except Exception as e:
+        logger.warning(f"Error bringing window to front: {e}")
+    return False
+
+
+def focus_interactive_browser(user_id: str) -> dict:
+    """
+    Bring the running interactive Chrome window to the front for the user.
+    Uses Windows user32 API to restore and focus the window, and activates the CDP tab.
+    """
+    active = _active_interactive_sessions.get(user_id)
+    if not active or active.get("status") not in ["waiting_for_user", "launching"]:
+        return {
+            "success": False,
+            "status": "closed",
+            "message": "No active browser session is currently open. Click 'Connect LinkedIn' to launch a new browser window."
+        }
+
+    proc = active.get("proc")
+    if proc and proc.poll() is not None:
+        active["status"] = "closed"
+        active["browser_verified"] = False
+        return {
+            "success": False,
+            "status": "closed",
+            "message": "The browser window was closed. Click 'Connect LinkedIn' to launch a new browser window."
+        }
+
+    pid = active.get("pid")
+    cdp_url = active.get("cdp_url")
+
+    focused = False
+    if pid:
+        focused = bring_window_to_front(pid)
+
+    if cdp_url:
+        try:
+            import urllib.request
+            with urllib.request.urlopen(f"{cdp_url}/json/list", timeout=1.5) as resp:
+                targets = json.loads(resp.read().decode())
+                if targets:
+                    target_id = targets[0].get("id")
+                    if target_id:
+                        req = urllib.request.Request(f"{cdp_url}/json/activate/{target_id}")
+                        with urllib.request.urlopen(req, timeout=1.5):
+                            focused = True
+        except Exception as cdp_err:
+            logger.debug(f"CDP activate target note: {cdp_err}")
+
+    return {
+        "success": True,
+        "status": "waiting_for_user",
+        "focused": focused,
+        "message": "Browser window brought to front. Please log into LinkedIn."
+    }
+
+
+def cancel_interactive_login(user_id: str) -> dict:
+    """Terminate any running interactive browser process for the user and clear active session."""
+    active = _active_interactive_sessions.get(user_id)
+    if active:
+        proc = active.get("proc")
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                time.sleep(0.3)
+                if proc.poll() is None:
+                    proc.kill()
+            except Exception:
+                pass
+        _active_interactive_sessions[user_id] = {
+            "status": "cancelled",
+            "message": "Interactive login cancelled by user.",
+            "browser_verified": False,
+        }
+    profile_dir = get_user_profile_dir(user_id)
+    cleanup_profile_locks(profile_dir)
+    return {"success": True, "message": "Interactive login cancelled and processes cleaned up."}
+
+
+def get_interactive_session_info(user_id: str) -> dict:
+    """Return sanitized status of the interactive browser session for this user."""
+    active = _active_interactive_sessions.get(user_id)
+    if not active:
+        return {"status": "none", "browser_verified": False}
+
+    proc = active.get("proc")
+    if active.get("status") in ["launching", "waiting_for_user"]:
+        if proc and proc.poll() is not None:
+            active["status"] = "closed"
+            active["browser_verified"] = False
+            active["message"] = "Browser window was closed before login."
+
+    return {k: v for k, v in active.items() if k != "proc"}
 
 
 def get_persistent_context(pw, user_id: Optional[str], headless: Optional[bool] = None, timeout_ms: int = 30000):

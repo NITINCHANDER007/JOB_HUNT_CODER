@@ -7,3 +7,4 @@ call .venv\Scripts\activate.bat
 set PYTHONPATH=autoapply-ai\backend
 pytest autoapply-ai\backend\tests -v
 pause
+

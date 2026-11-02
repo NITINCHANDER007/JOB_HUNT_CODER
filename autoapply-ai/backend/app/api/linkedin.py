@@ -18,6 +18,9 @@ from app.services.browser_session_service import (
     launch_manual_linkedin_login,
     verify_linkedin_session,
     disconnect_linkedin_session,
+    focus_interactive_browser,
+    cancel_interactive_login,
+    get_interactive_session_info,
     _active_interactive_sessions,
 )
 
@@ -42,6 +45,7 @@ def session_connect(current_user):
     Launch a visible (headed) Chrome browser window for manual LinkedIn login.
     Cleans up stale locks, starts the interactive session, verifies launch,
     and returns verified launch status.
+    If an interactive session is already open and running, returns already_running: True.
     """
     user_id = str(current_user.id)
     force = request.args.get("force") == "true" or (request.is_json and bool(request.json and request.json.get("force")))
@@ -49,13 +53,15 @@ def session_connect(current_user):
     # Check if a login session is already running
     active = _active_interactive_sessions.get(user_id)
     if not force and active and active.get("status") in ["launching", "waiting_for_user"]:
-        import time
-        if time.time() - active.get("start_ts", 0) < 300:
+        proc = active.get("proc")
+        # If the process is still running, return already_running status
+        if proc is None or proc.poll() is None:
             return jsonify({
-                "message": active.get("message", "Interactive browser window is already open. Please complete your login."),
-                "status": active.get("status"),
-                "browser_verified": active.get("browser_verified", False),
-                "session": active,
+                "already_running": True,
+                "message": active.get("message", "Chrome browser is already open on your desktop. Please complete your LinkedIn login."),
+                "status": "waiting_for_user",
+                "browser_verified": True,
+                "session": get_interactive_session_info(user_id),
             })
 
     ready_event = threading.Event()
@@ -79,28 +85,32 @@ def session_connect(current_user):
             "browser_verified": False,
         }), 500
 
+    info = get_interactive_session_info(user_id)
     return jsonify({
         "message": active_now.get("message", "Chrome browser is opening. Please log into your LinkedIn account."),
         "status": active_now.get("status", "launching"),
         "browser_verified": active_now.get("browser_verified", False),
-        "session": active_now,
+        "session": info,
     })
+
+
+@linkedin_bp.route("/session/open-browser", methods=["POST"])
+@token_required
+def session_open_browser(current_user):
+    """Bring the running interactive Chrome window to the foreground on desktop."""
+    user_id = str(current_user.id)
+    result = focus_interactive_browser(user_id)
+    status_code = 200 if result.get("success") else 400
+    return jsonify(result), status_code
 
 
 @linkedin_bp.route("/session/cancel-login", methods=["POST"])
 @token_required
 def cancel_login(current_user):
     """Cancel any active interactive login session and clean up browser processes."""
-    from app.services.browser_session_service import cleanup_profile_locks, get_user_profile_dir
     user_id = str(current_user.id)
-    profile_dir = get_user_profile_dir(user_id)
-    cleanup_profile_locks(profile_dir)
-    _active_interactive_sessions[user_id] = {
-        "status": "cancelled",
-        "message": "Login attempt cancelled.",
-        "browser_verified": False,
-    }
-    return jsonify({"message": "Interactive login cancelled and processes cleaned up."})
+    result = cancel_interactive_login(user_id)
+    return jsonify(result)
 
 
 @linkedin_bp.route("/session/connect-status", methods=["GET"])
@@ -108,7 +118,7 @@ def cancel_login(current_user):
 def session_connect_status(current_user):
     """Poll live progress of the interactive manual login window."""
     user_id = str(current_user.id)
-    active = _active_interactive_sessions.get(user_id, {})
+    active = get_interactive_session_info(user_id)
     current_status = get_linkedin_session_status(user_id)
 
     return jsonify({
