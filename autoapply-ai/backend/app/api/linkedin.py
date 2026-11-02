@@ -40,7 +40,8 @@ def session_status(current_user):
 def session_connect(current_user):
     """
     Launch a visible (headed) Chrome browser window for manual LinkedIn login.
-    Runs asynchronously in a background thread so the user can interact freely.
+    Cleans up stale locks, starts the interactive session, verifies launch,
+    and returns verified launch status.
     """
     user_id = str(current_user.id)
     force = request.args.get("force") == "true" or (request.is_json and bool(request.json and request.json.get("force")))
@@ -51,21 +52,53 @@ def session_connect(current_user):
         import time
         if time.time() - active.get("start_ts", 0) < 300:
             return jsonify({
-                "message": "Interactive browser window is already open. Please complete your login.",
+                "message": active.get("message", "Interactive browser window is already open. Please complete your login."),
                 "status": active.get("status"),
+                "browser_verified": active.get("browser_verified", False),
                 "session": active,
             })
 
+    ready_event = threading.Event()
+
     def _run_login():
-        launch_manual_linkedin_login(user_id=user_id, timeout_seconds=300)
+        launch_manual_linkedin_login(user_id=user_id, timeout_seconds=300, ready_event=ready_event)
 
     thread = threading.Thread(target=_run_login, daemon=True)
     thread.start()
 
+    # Wait up to 5 seconds for launch verification
+    ready_event.wait(timeout=5.0)
+
+    active_now = _active_interactive_sessions.get(user_id, {})
+    if active_now.get("status") == "error":
+        return jsonify({
+            "error": active_now.get("error") or active_now.get("message"),
+            "status": "error",
+            "browser_verified": False,
+        }), 500
+
     return jsonify({
-        "message": "Chrome browser opened. Please log into your LinkedIn account in the newly opened window.",
-        "status": "launching",
+        "message": active_now.get("message", "Chrome browser is opening. Please log into your LinkedIn account."),
+        "status": active_now.get("status", "launching"),
+        "browser_verified": active_now.get("browser_verified", False),
+        "session": active_now,
     })
+
+
+@linkedin_bp.route("/session/cancel-login", methods=["POST"])
+@token_required
+def cancel_login(current_user):
+    """Cancel any active interactive login session and clean up browser processes."""
+    from app.services.browser_session_service import cleanup_profile_locks, get_user_profile_dir
+    user_id = str(current_user.id)
+    profile_dir = get_user_profile_dir(user_id)
+    cleanup_profile_locks(profile_dir)
+    _active_interactive_sessions[user_id] = {
+        "status": "cancelled",
+        "message": "Login attempt cancelled.",
+        "browser_verified": False,
+    }
+    return jsonify({"message": "Interactive login cancelled and processes cleaned up."})
 
 
 @linkedin_bp.route("/session/connect-status", methods=["GET"])

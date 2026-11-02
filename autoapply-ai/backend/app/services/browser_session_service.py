@@ -58,6 +58,59 @@ def get_storage_state_path(user_id: Optional[str]) -> str:
     return os.path.join(profile_dir, "storage_state.json")
 
 
+def _get_chrome_launch_kwargs() -> dict:
+    """
+    Detect whether Google Chrome is installed on the host system to launch real Chrome,
+    otherwise fallback to Playwright's bundled Chromium.
+    """
+    chrome_paths = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%PROGRAMFILES%\Google\Chrome\Application\chrome.exe"),
+    ]
+    for p in chrome_paths:
+        if os.path.isfile(p):
+            return {"channel": "chrome"}
+    return {}
+
+
+def cleanup_profile_locks(profile_dir: str):
+    """
+    Clean up any orphaned chrome/chromium processes locking the user-data-dir
+    and remove leftover lockfile / SingletonLock to prevent ProcessSingleton errors.
+    """
+    import psutil
+
+    abs_profile_dir = os.path.abspath(profile_dir).lower()
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            cmdline = " ".join(proc.info.get("cmdline") or []).lower()
+            name = (proc.info.get("name") or "").lower()
+            if abs_profile_dir in cmdline and "chrome" in name:
+                try:
+                    proc.kill()
+                    logger.info("Killed orphaned chrome process %s locking profile dir", proc.info.get("pid"))
+                except Exception:
+                    pass
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    # Give Windows OS a moment to release handles
+    time.sleep(0.3)
+
+    # Remove stale lock files
+    for lock_name in ["lockfile", "SingletonLock", "SingletonCookie", "SingletonSocket"]:
+        lock_path = os.path.join(profile_dir, lock_name)
+        if os.path.exists(lock_path):
+            try:
+                os.remove(lock_path)
+                logger.info("Removed stale lock file: %s", lock_path)
+            except Exception as e:
+                logger.warning("Could not remove lock file %s: %s", lock_path, e)
+
+
+
 def get_linkedin_session_status(user_id: Optional[str]) -> dict:
     """
     Inspect the stored cookies/session for a user to determine if LinkedIn
@@ -152,9 +205,9 @@ def get_linkedin_session_status(user_id: Optional[str]) -> dict:
         }
 
 
-def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300) -> dict:
+def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300, ready_event=None) -> dict:
     """
-    Launch a visible (headed) Chromium browser session using the user's persistent profile.
+    Launch a visible (headed) Chrome browser session using the user's persistent profile.
     Navigates to https://www.linkedin.com/login and waits for the user to manually log in,
     complete 2FA/OTP/CAPTCHA. Once logged in, exports storage_state.json and saves session.
     """
@@ -167,26 +220,39 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300) -> di
     _active_interactive_sessions[user_id] = {
         "session_id": session_id,
         "status": "launching",
+        "browser_verified": False,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "start_ts": time.time(),
-        "message": "Opening browser window for LinkedIn login...",
+        "message": "Preparing persistent profile and launching visible Chrome window...",
     }
+
+    # 1. Clean up stale profile locks / orphaned processes
+    try:
+        cleanup_profile_locks(profile_dir)
+    except Exception as lock_err:
+        logger.warning("Note during profile lock cleanup: %s", lock_err)
 
     try:
         with sync_playwright() as pw:
-            # Launch persistent context headed so user can interact
+            launch_kwargs = _get_chrome_launch_kwargs()
+            logger.info("Launching Chrome with launch_kwargs: %s", launch_kwargs)
+
+            # Launch persistent context headed and maximized so user can interact directly
             context = pw.chromium.launch_persistent_context(
                 user_data_dir=profile_dir,
                 headless=False,
-                viewport={"width": 1280, "height": 850},
+                no_viewport=True,
                 user_agent=_DEFAULT_USER_AGENT,
                 locale="en-US",
                 timezone_id="America/New_York",
                 args=[
+                    "--start-maximized",
+                    "--new-window",
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-blink-features=AutomationControlled",
                 ],
+                **launch_kwargs
             )
 
             # Mask automation flags
@@ -194,15 +260,24 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300) -> di
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
 
-            page = context.new_page() if not context.pages else context.pages[0]
-            _active_interactive_sessions[user_id]["status"] = "waiting_for_user"
-            _active_interactive_sessions[user_id]["message"] = "Browser opened. Please log into your LinkedIn account."
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
 
             logger.info(f"Navigating to LinkedIn login in headed browser for user {user_id}")
             try:
                 page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=45000)
             except Exception as nav_e:
                 logger.warning(f"Initial navigation note: {nav_e}")
+
+            # Window is verified open on the user desktop
+            _active_interactive_sessions[user_id]["status"] = "waiting_for_user"
+            _active_interactive_sessions[user_id]["browser_verified"] = True
+            _active_interactive_sessions[user_id]["message"] = "Chrome window is open on your desktop! Please log into your LinkedIn account."
+            if ready_event:
+                ready_event.set()
 
             # Polling loop: wait for user to sign in
             start_time = time.time()
@@ -213,6 +288,7 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300) -> di
                 try:
                     # Check if page context was closed by user
                     if not context.pages or page.is_closed():
+                        logger.info("Chrome window closed by user.")
                         break
 
                     current_url = page.url.lower()
@@ -246,7 +322,9 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300) -> di
 
                     # 4. Status hints for checkpoints / 2FA
                     if "checkpoint" in current_url or "challenge" in current_url:
-                        _active_interactive_sessions[user_id]["message"] = "Security verification or 2FA detected. Please complete the verification in the opened browser window."
+                        _active_interactive_sessions[user_id]["message"] = "Security verification or 2FA detected. Please complete the verification in the opened Chrome window."
+                    elif "checkpoint/lg/login-submit" in current_url:
+                        _active_interactive_sessions[user_id]["message"] = "Submitting credentials... Please complete any 2FA challenge if prompted."
 
                     time.sleep(1.5)
                 except Exception as loop_e:
@@ -317,8 +395,19 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300) -> di
     except Exception as e:
         logger.error(f"Error during interactive LinkedIn login: {e}")
         _active_interactive_sessions[user_id] = {
+            "session_id": session_id,
             "status": "error",
-            "message": str(e),
+            "browser_verified": False,
+            "error": str(e),
+            "message": f"Could not launch Chrome: {e}",
+        }
+        if ready_event:
+            ready_event.set()
+        return {
+            "success": False,
+            "connected": False,
+            "error": str(e),
+            "message": f"Could not launch browser login: {e}",
         }
         return {
             "success": False,
@@ -453,12 +542,19 @@ def get_persistent_context(pw, user_id: Optional[str], headless: Optional[bool] 
     """
     profile_dir = get_user_profile_dir(user_id)
 
+    # Clean stale locks
+    try:
+        cleanup_profile_locks(profile_dir)
+    except Exception:
+        pass
+
     if headless is None:
         if has_app_context():
             headless = current_app.config.get("PLAYWRIGHT_HEADLESS", False)
         else:
             headless = os.getenv("PLAYWRIGHT_HEADLESS", "false").lower() == "true"
 
+    launch_kwargs = _get_chrome_launch_kwargs()
     context = pw.chromium.launch_persistent_context(
         user_data_dir=profile_dir,
         headless=headless,
@@ -471,6 +567,7 @@ def get_persistent_context(pw, user_id: Optional[str], headless: Optional[bool] 
             "--disable-dev-shm-usage",
             "--disable-blink-features=AutomationControlled",
         ],
+        **launch_kwargs
     )
 
     context.add_init_script(

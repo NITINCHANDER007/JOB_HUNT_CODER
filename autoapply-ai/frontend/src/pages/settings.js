@@ -275,28 +275,66 @@ const SettingsPage = (() => {
     const progress = document.getElementById('li-login-progress');
     if (btn) {
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner-sm"></span> Opening Browser…';
+      btn.innerHTML = '<span class="spinner-sm"></span> Launching Chrome…';
     }
     if (progress) {
       progress.style.display = 'block';
       progress.innerHTML = `
-        <div style="padding: 10px 14px; background: var(--bg-card); border: 1px solid var(--accent); border-radius: var(--radius-sm); font-size: 0.85rem;">
-          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-            <span class="spinner-sm"></span>
-            <strong>Chrome browser window opened on your desktop!</strong>
+        <div style="padding: 12px 16px; background: var(--bg-card); border: 1px solid var(--accent); border-radius: var(--radius-sm); font-size: 0.85rem;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="spinner-sm"></span>
+              <strong id="li-progress-title">Launching Chrome browser on your desktop…</strong>
+            </div>
+            <button class="btn btn-xs btn-ghost text-muted" id="li-cancel-btn" style="padding: 2px 8px; font-size: 0.75rem;">Cancel</button>
           </div>
-          <div style="color: var(--text-secondary);">
-            Please log into your LinkedIn account in the window (and complete any 2FA/CAPTCHA). We'll automatically detect when you're logged in.
+          <div id="li-progress-msg" style="color: var(--text-secondary); line-height: 1.4;">
+            Preparing browser profile and launching Chrome window...
           </div>
           <div id="li-status-detail" style="font-weight: 500; color: #38bdf8; margin-top: 6px; font-size: 0.8rem;">
-            Waiting for your login in the browser window...
+            Connecting to browser process...
           </div>
         </div>
       `;
+
+      const cancelBtn = progress.querySelector('#li-cancel-btn');
+      if (cancelBtn) {
+        cancelBtn.addEventListener('click', async () => {
+          if (_linkedinPollTimer) {
+            clearInterval(_linkedinPollTimer);
+            _linkedinPollTimer = null;
+          }
+          try {
+            await linkedinAPI.cancelLogin();
+          } catch (e) {
+            // ignore
+          }
+          showToast('LinkedIn login cancelled', 'info');
+          loadLinkedInStatus();
+        });
+      }
     }
 
     try {
-      await linkedinAPI.connect();
+      const connectRes = await linkedinAPI.connect();
+
+      // If backend returned error directly
+      if (connectRes.status === 'error' || connectRes.error) {
+        throw new Error(connectRes.error || connectRes.message || 'Failed to launch Chrome');
+      }
+
+      // Update message once confirmed
+      const titleEl = progress ? progress.querySelector('#li-progress-title') : null;
+      const msgEl = progress ? progress.querySelector('#li-progress-msg') : null;
+      const detailEl = progress ? progress.querySelector('#li-status-detail') : null;
+
+      if (connectRes.browser_verified && titleEl) {
+        titleEl.textContent = 'Chrome browser window is open on your desktop!';
+        if (msgEl) msgEl.textContent = 'Please log into LinkedIn in the opened Chrome window. Automation will automatically detect your login.';
+      }
+      if (connectRes.message && detailEl) {
+        detailEl.textContent = connectRes.message;
+      }
 
       // Start polling for login completion
       if (_linkedinPollTimer) clearInterval(_linkedinPollTimer);
@@ -306,9 +344,19 @@ const SettingsPage = (() => {
           const interactive = res.interactive || {};
           const session = res.session || {};
 
-          if (interactive.message && progress) {
+          if (progress) {
             const detail = progress.querySelector('#li-status-detail');
-            if (detail) detail.textContent = interactive.message;
+            const title = progress.querySelector('#li-progress-title');
+            const msg = progress.querySelector('#li-progress-msg');
+
+            if (interactive.message && detail) {
+              detail.textContent = interactive.message;
+            }
+
+            if (interactive.browser_verified && title && !title.textContent.includes('open')) {
+              title.textContent = 'Chrome browser window is open on your desktop!';
+              if (msg) msg.textContent = 'Please log into LinkedIn in the opened Chrome window. Automation will automatically detect your login.';
+            }
           }
 
           if (session.connected || interactive.status === 'success') {
@@ -316,11 +364,26 @@ const SettingsPage = (() => {
             _linkedinPollTimer = null;
             showToast('LinkedIn login successful! Your persistent session is saved 🎉', 'success');
             loadLinkedInStatus();
-          } else if (interactive.status === 'timed_out' || interactive.status === 'error') {
+          } else if (interactive.status === 'timed_out') {
             clearInterval(_linkedinPollTimer);
             _linkedinPollTimer = null;
-            showToast(interactive.message || 'Login cancelled or timed out', 'warning');
+            showToast(interactive.message || 'Login timed out or window was closed', 'warning');
             loadLinkedInStatus();
+          } else if (interactive.status === 'error') {
+            clearInterval(_linkedinPollTimer);
+            _linkedinPollTimer = null;
+            showToast('Chrome launch error: ' + (interactive.error || interactive.message), 'error');
+            if (progress) {
+              progress.innerHTML = `
+                <div style="padding: 10px 14px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: var(--radius-sm); font-size: 0.85rem; color: #ef4444;">
+                  <strong>Could not launch Chrome:</strong> ${escapeHtml(interactive.error || interactive.message)}
+                </div>
+              `;
+            }
+            if (btn) {
+              btn.disabled = false;
+              btn.textContent = '🔗 Connect LinkedIn';
+            }
           }
         } catch (e) {
           // ignore transient poll error
@@ -328,12 +391,22 @@ const SettingsPage = (() => {
       }, 2000);
 
     } catch (err) {
-      showToast('Could not launch browser login: ' + err.message, 'error');
+      if (_linkedinPollTimer) {
+        clearInterval(_linkedinPollTimer);
+        _linkedinPollTimer = null;
+      }
+      showToast('Failed to start LinkedIn connection: ' + err.message, 'error');
+      if (progress) {
+        progress.innerHTML = `
+          <div style="padding: 10px 14px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: var(--radius-sm); font-size: 0.85rem; color: #ef4444;">
+            <strong>Launch Failed:</strong> ${escapeHtml(err.message)}
+          </div>
+        `;
+      }
       if (btn) {
         btn.disabled = false;
-        btn.innerHTML = '🔗 Connect LinkedIn';
+        btn.textContent = '🔗 Connect LinkedIn';
       }
-      if (progress) progress.style.display = 'none';
     }
   }
 

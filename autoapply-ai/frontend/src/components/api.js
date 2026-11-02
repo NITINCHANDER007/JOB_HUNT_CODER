@@ -113,8 +113,9 @@ const applicationsAPI = {
 
 const linkedinAPI = {
   status: () => api.get('/api/linkedin/session/status'),
-  connect: () => api.post('/api/linkedin/session/connect'),
+  connect: (force = false) => api.post('/api/linkedin/session/connect' + (force ? '?force=true' : '')),
   connectStatus: () => api.get('/api/linkedin/session/connect-status'),
+  cancelLogin: () => api.post('/api/linkedin/session/cancel-login'),
   verify: () => api.post('/api/linkedin/session/verify'),
   disconnect: () => api.post('/api/linkedin/session/disconnect'),
   updateSettings: (data) => api.post('/api/linkedin/settings', data),
