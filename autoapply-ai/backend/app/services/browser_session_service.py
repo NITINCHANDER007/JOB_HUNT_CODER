@@ -76,11 +76,6 @@ def find_chrome_executable() -> Optional[str]:
     return None
 
 
-def is_running_in_docker() -> bool:
-    """Detect whether backend is executing inside a Docker container."""
-    return os.path.exists("/.dockerenv") or os.getenv("DOCKER_CONTAINER") == "true"
-
-
 def find_free_port(start_port: int = 9222) -> int:
     """Find an available TCP port for Chrome remote debugging."""
     import socket
@@ -270,65 +265,23 @@ def launch_manual_linkedin_login(user_id: str, timeout_seconds: int = 300, ready
     cdp_url = None
 
     try:
-        # Check if inside Docker
-        if is_running_in_docker():
-            logger.info("Backend detected running inside Docker container")
-            bridge_hosts = ["host.docker.internal", "172.17.0.1", "localhost"]
-            bridge_working = False
-            for bh in bridge_hosts:
-                try:
-                    with urllib.request.urlopen(f"http://{bh}:9225/status", timeout=1.5) as resp:
-                        if resp.status == 200:
-                            bridge_working = True
-                            # Launch through bridge
-                            launch_req = urllib.request.Request(
-                                f"http://{bh}:9225/launch",
-                                data=json.dumps({"profile_dir": profile_dir, "url": "https://www.linkedin.com/login"}).encode("utf-8"),
-                                headers={"Content-Type": "application/json"}
-                            )
-                            with urllib.request.urlopen(launch_req, timeout=10) as lresp:
-                                ldata = json.loads(lresp.read().decode("utf-8"))
-                                cdp_port = ldata.get("cdp_port", 9222)
-                                cdp_url = f"http://{bh}:{cdp_port}"
-                                break
-                except Exception:
-                    continue
-
-            if not bridge_working or not cdp_url:
-                err_msg = (
-                    "Backend is running inside a Docker container without desktop display access. "
-                    "To launch visible Chrome on your desktop, run 'start_windows_browser_bridge.bat' "
-                    "on your Windows host, or run the backend natively using 'python autoapply-ai\\backend\\run.py'."
-                )
-                _active_interactive_sessions[user_id] = {
-                    "session_id": session_id,
-                    "status": "error",
-                    "browser_verified": False,
-                    "error": err_msg,
-                    "message": err_msg,
-                }
-                if ready_event:
-                    ready_event.set()
-                return {"success": False, "connected": False, "error": err_msg, "message": err_msg}
-
-        else:
-            # Running natively on Windows
-            chrome_exe = find_chrome_executable()
-            if not chrome_exe:
-                err_msg = (
-                    "Google Chrome executable not found on Windows at standard installation locations. "
-                    "Please install Google Chrome (https://www.google.com/chrome) to enable interactive Easy Apply."
-                )
-                _active_interactive_sessions[user_id] = {
-                    "session_id": session_id,
-                    "status": "error",
-                    "browser_verified": False,
-                    "error": err_msg,
-                    "message": err_msg,
-                }
-                if ready_event:
-                    ready_event.set()
-                return {"success": False, "connected": False, "error": err_msg, "message": err_msg}
+        # Running natively on Windows
+        chrome_exe = find_chrome_executable()
+        if not chrome_exe:
+            err_msg = (
+                "Google Chrome executable not found on Windows at standard installation locations. "
+                "Please install Google Chrome (https://www.google.com/chrome) to enable interactive Easy Apply."
+            )
+            _active_interactive_sessions[user_id] = {
+                "session_id": session_id,
+                "status": "error",
+                "browser_verified": False,
+                "error": err_msg,
+                "message": err_msg,
+            }
+            if ready_event:
+                ready_event.set()
+            return {"success": False, "connected": False, "error": err_msg, "message": err_msg}
 
             cdp_port = find_free_port(9222)
             cdp_url = f"http://127.0.0.1:{cdp_port}"
@@ -671,10 +624,12 @@ def disconnect_linkedin_session(user_id: str) -> dict:
 
 def get_persistent_context(pw, user_id: Optional[str], headless: Optional[bool] = None, timeout_ms: int = 30000):
     """
-    Helper to launch a persistent Chromium BrowserContext with the user's saved profile,
-    cookies, anti-bot evasion settings, and realistic browser configuration.
+    Helper to launch a persistent Chromium/Chrome BrowserContext with the user's saved profile,
+    cookies, anti-bot evasion settings, and realistic browser configuration on Windows.
+    Ensures session persistence by loading both disk profile and storage_state.json cookies.
     """
     profile_dir = get_user_profile_dir(user_id)
+    state_file = get_storage_state_path(user_id)
 
     # Clean stale locks
     try:
@@ -689,25 +644,42 @@ def get_persistent_context(pw, user_id: Optional[str], headless: Optional[bool] 
             headless = os.getenv("PLAYWRIGHT_HEADLESS", "false").lower() == "true"
 
     launch_kwargs = _get_chrome_launch_kwargs()
+    extra_args = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+    ]
+    if not headless:
+        extra_args.extend(["--start-maximized", "--new-window"])
+
     context = pw.chromium.launch_persistent_context(
         user_data_dir=profile_dir,
         headless=headless,
-        viewport={"width": 1280, "height": 850},
+        no_viewport=True if not headless else False,
+        viewport=None if not headless else {"width": 1280, "height": 850},
         user_agent=_DEFAULT_USER_AGENT,
         locale="en-US",
         timezone_id="America/New_York",
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
-        ],
+        args=extra_args,
         **launch_kwargs
     )
 
+    # Mask automation signals
     context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
-    context.set_default_timeout(timeout_ms)
 
+    # Explicitly restore cookies from storage_state.json if available
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, "r", encoding="utf-8") as sf:
+                saved = json.load(sf)
+                cookies = saved.get("cookies", [])
+                if cookies:
+                    context.add_cookies(cookies)
+        except Exception as e:
+            logger.warning("Could not restore cookies from storage_state.json: %s", e)
+
+    context.set_default_timeout(timeout_ms)
     return context
 
